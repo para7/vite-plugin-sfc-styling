@@ -59,7 +59,27 @@ export default defineConfig({
 pnpm dev        # src/App.tsx のデモ
 pnpm test       # vitest: transform / build / dev サーバー
 pnpm test:e2e   # playwright: 実ブラウザで HMR を確認 (初回は pnpm exec playwright install --only-shell chromium)
+pnpm bench      # vite build の時間
+pnpm bench:dev  # dev サーバーの起動・初回ロード・CSS だけの HMR の時間 (実ブラウザ)
 ```
+
+## パフォーマンス
+
+同じ見た目のコンポーネントを「`css` で書いたもの」と「`.module.css` に分けたもの」の 2 通りで生成し (`.bench/` に出力、gitignore 済み)、時間を比べます。引数で規模を変えられます: `pnpm bench [ファイル数=500] [クラス数=20] [回数=5]` (`bench:dev` も同じ)。
+
+500 ファイル × 20 クラスでの結果 (中央値。Intel Core Ultra 7 268V / WSL2 / Vite 8.3.2):
+
+| | `css` | `.module.css` |
+|---|---|---|
+| `vite build` | 566〜612ms | 499〜574ms |
+| dev 初回ロード | 2477〜2505ms | 2396〜2439ms |
+| dev 2 回目ロード (サーバーのキャッシュあり) | 1738〜1774ms | 1707〜1846ms |
+| CSS だけの HMR | 33ms | 67〜83ms |
+
+- プラグイン自身の transform は 1 ファイルあたり約 0.12ms (500 ファイルで約 60ms)。時間はファイル数に比例します (2000 ファイルでの build は 2348ms 対 2099ms)
+- dev の初回ロードの大半は、モジュール約 1000 個の取得です。モジュール数はどちらも同じです
+- HMR は `css` のほうが速くなります。`.module.css` は import 元の `.tsx` まで更新が伝わり React が再描画しますが、`css` は変わった CSS だけを差し替えます
+- 未計測: 1 ファイルが大きいコンポーネント (生成するのは 25 行程度で、プラグインは `.tsx` 全体をパースするのでファイルの大きさに比例して遅くなる)、React Compiler を入れた構成、JS を変えたときの HMR
 
 ## 今後の予定
 

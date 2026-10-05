@@ -9,7 +9,9 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "bench": "node bench/build.ts",
+    "bench:dev": "node bench/dev.ts"
   },
   "dependencies": {
     "react": "^19.2.8",

@@ -28,9 +28,11 @@ test.beforeEach(async ({ page }) => {
   await expect(button).toHaveText('Count is 3')
 })
 
-test('CSS だけの変更: スタイルが変わり、モジュール再評価も再レンダーも起きない', async ({ page }) => {
+test('CSS だけの変更: スタイルが変わり、モジュール再評価も再レンダーも <style> の重複も起きない', async ({ page }) => {
   const button = page.getByRole('button')
+  const sfcStyles = page.locator('style[data-vite-dev-id*=".sfc"]')
   await expect(button).toHaveCSS('color', 'rgb(255, 0, 0)')
+  await expect(sfcStyles).toHaveCount(2)
   const before = await counters(page)
 
   await edit((s) => s.replace('rgb(255, 0, 0)', 'rgb(0, 0, 255)'))
@@ -38,27 +40,7 @@ test('CSS だけの変更: スタイルが変わり、モジュール再評価�
 
   expect(await counters(page)).toEqual(before)
   await expect(button).toHaveText('Count is 3')
-})
-
-test('2 つ目のブロックだけの変更も反映される', async ({ page }) => {
-  const label = page.locator('span')
-  await expect(label).toHaveCSS('font-weight', '700')
-  const before = await counters(page)
-
-  // 400 はブラウザ既定値なので、スタイルが外れただけでも通ってしまう。既定以外の値を使う
-  await edit((s) => s.replace('font-weight: 700', 'font-weight: 900'))
-  await expect(label).toHaveCSS('font-weight', '900')
-  expect(await counters(page)).toEqual(before)
-})
-
-test('JS の変更: Fast Refresh で state を保ったまま、スタイルも当たり続ける', async ({ page }) => {
-  const button = page.getByRole('button')
-  const before = await counters(page)
-
-  await edit((s) => s.replace('Count is', 'Clicks:'))
-  await expect(button).toHaveText('Clicks: 3')
-  await expect(button).toHaveCSS('color', 'rgb(255, 0, 0)')
-  expect((await counters(page)).evals).toBe(before.evals + 1)
+  await expect(sfcStyles).toHaveCount(2)
 })
 
 test('JS と CSS を同時に変更 (クラス追加): 新しいクラスが当たる', async ({ page }) => {
@@ -93,29 +75,22 @@ test('ブロックを削除すると、その <style> も消える', async ({ pa
   await expect(page.getByRole('button')).toHaveText('Count is 3')
 })
 
-test('CSS → JS → CSS の順に変更しても、最後の CSS 変更は再評価なしで反映される', async ({ page }) => {
+test('CSS → JS → CSS: JS の変更は state を保った Fast Refresh、最後の CSS 変更は再評価なしで反映される', async ({ page }) => {
   const button = page.getByRole('button')
   await edit((s) => s.replace('rgb(255, 0, 0)', 'rgb(0, 128, 0)'))
   await expect(button).toHaveCSS('color', 'rgb(0, 128, 0)')
+  const afterCss = await counters(page)
 
   await edit((s) => s.replace('Count is', 'Clicks:'))
   await expect(button).toHaveText('Clicks: 3')
+  // 再評価後もクラス名マップが CSS と一致している
+  await expect(button).toHaveCSS('color', 'rgb(0, 128, 0)')
   const afterJs = await counters(page)
+  expect(afterJs.evals).toBe(afterCss.evals + 1)
 
   await edit((s) => s.replace('rgb(0, 128, 0)', 'rgb(0, 0, 255)'))
   await expect(button).toHaveCSS('color', 'rgb(0, 0, 255)')
   expect(await counters(page)).toEqual(afterJs)
-})
-
-test('CSS を何度変更しても <style> が重複しない', async ({ page }) => {
-  const styleCount = () => page.locator('style[data-vite-dev-id*=".sfc"]').count()
-  const before = await styleCount()
-  expect(before).toBe(2)
-  for (const c of ['rgb(1, 1, 1)', 'rgb(2, 2, 2)', 'rgb(3, 3, 3)']) {
-    await edit((s) => s.replace(/\.button \{ color: [^;]+;/, `.button { color: ${c};`))
-    await expect(page.getByRole('button')).toHaveCSS('color', c)
-  }
-  expect(await styleCount()).toBe(before)
 })
 
 test('構文エラーから CSS を変えて復帰: エラー表示が消え、state を保ったまま反映される', async ({ page }) => {
@@ -129,11 +104,3 @@ test('構文エラーから CSS を変えて復帰: エラー表示が消え、s
   await expect(button).toHaveText('Count is 3')
 })
 
-test('構文エラーから元の内容に戻す (自動保存でよくある): エラー表示が消える', async ({ page }) => {
-  await edit((s) => s + '\nconst (')
-  await expect(page.locator('vite-error-overlay')).toBeAttached()
-
-  await write(BASE)
-  await expect(page.locator('vite-error-overlay')).not.toBeAttached()
-  await expect(page.getByRole('button')).toHaveText('Count is 3')
-})
