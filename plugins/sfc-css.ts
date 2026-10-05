@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { isFileServingAllowed, normalizePath, parseAst, type Plugin, type ResolvedConfig } from 'vite'
+import { normalizePath, parseAst, type Plugin, type ResolvedConfig } from 'vite'
 
 // const styles = css`.root { color: red }` を、同じファイルから派生した
 // 仮想 CSS Module (`App.tsx.sfc0.module.css`) の import に置き換える。
@@ -148,9 +147,10 @@ export default function sfcCss(): Plugin[] {
         // transform が出力した絶対パス。仮想 CSS は実在しないので Vite は /@fs/ を付けず、
         // dev でも root 外のファイルはこの形のまま URL になる
         if (cssByFile.has(m[1])) return id
-        // dev の root 相対 URL (`/src/App.tsx.sfc0.module.css`)。読んでよいかは load で判定する
+        // dev の root 相対 URL (`/src/App.tsx.sfc0.module.css`)。
+        // どちらも transform 済みのファイルしか受け付けない (server.fs.allow を回避されないため。緩めないこと)
         const abs = normalizePath(path.join(config.root, id))
-        if (existsSync(abs.match(VIRTUAL_RE)![1])) return abs
+        if (cssByFile.has(abs.match(VIRTUAL_RE)![1])) return abs
       },
 
       load(id) {
@@ -159,21 +159,17 @@ export default function sfcCss(): Plugin[] {
           return `export function css() { throw new Error('[sfc-css] css は css\`...\` の形でのみ使えます') }`
         const m = id.match(VIRTUAL_RE)
         if (!m) return
-        const [, file, index] = m
-        if (!cssByFile.has(file)) {
-          // dev サーバー再起動直後など、tsx より先に CSS が要求された場合。
-          // URL 由来の id (`/@id/<root>/../x` のような未解決のものも含む) が来るので、
-          // 正規化済みで、Vite 自身が配信を許すソースファイルだけを読む
-          if (!FILE_RE.test(file) || file !== normalizePath(path.resolve(file))) return
-          if (!isFileServingAllowed(config, file)) return
-          run(readFileSync(file, 'utf8'), file)
-        }
-        return cssByFile.get(file)?.[Number(index)] ?? ''
+        // 仮想 CSS は必ず tsx の transform の後に要求される (ブラウザ・SSR・ビルドのどれも importer が先)。
+        // 未 transform のファイル (`/@id/<root>/../x` のような URL 由来の id も含む) は読まない
+        const css = cssByFile.get(m[1])
+        if (css) return css[Number(m[2])] ?? ''
       },
 
-      transform(code, id) {
-        if (id.includes('?') || id.includes('/node_modules/') || !FILE_RE.test(id)) return
-        return run(code, id)?.code
+      transform: {
+        filter: { id: { include: FILE_RE, exclude: /\/node_modules\// }, code: MODULE_ID },
+        handler(code, id) {
+          return run(code, id)?.code
+        },
       },
 
       async hotUpdate({ file, modules, read }) {
@@ -201,15 +197,15 @@ export default function sfcCss(): Plugin[] {
       },
     },
     {
-      // CSS Module は exports を持つので Vite は self-accept させない (importer の再レンダーになる)。
-      // 仮想 CSS はクラス名が安定しているので、差し替えても importer 側の参照は壊れない。
-      // ここではクライアント側の accept 登録だけを行い、サーバー側の判定は hotUpdate で行う。
-      // import.meta.hot の無い ssrLoadModule でも動くようにガードする
+      // クライアント側の accept 登録だけを行う。self-accept させるかの判定は hotUpdate で行う
       name: 'sfc-css:hmr',
       apply: 'serve',
       enforce: 'post',
-      transform(code, id) {
-        if (VIRTUAL_RE.test(id)) return code + '\nif (import.meta.hot) import.meta.hot.accept()'
+      transform: {
+        filter: { id: VIRTUAL_RE },
+        handler(code) {
+          return code + '\nif (import.meta.hot) import.meta.hot.accept()'
+        },
       },
     },
   ]

@@ -1,11 +1,9 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { expect, test, type Page } from '@playwright/test'
 
+// テストは gitignore された Counter.tsx を書き換える。元の内容は Counter.base.tsx
 const FILE = 'e2e/app/Counter.tsx'
-const BASE = readFileSync(FILE, 'utf8')
-// 前回の実行が途中で落ちると FILE が書き換わったまま残り、それを BASE として読んでしまう
-if (!BASE.includes('rgb(255, 0, 0)') || !BASE.includes('font-weight: 700') || BASE.includes('const ('))
-  throw new Error(`${FILE} が前回のテストで書き換わったままです。git checkout -- ${FILE} で戻してください`)
+const BASE = readFileSync('e2e/app/Counter.base.tsx', 'utf8')
 // chokidar は同じパスの change を 50ms 以内だと捨てるので、書き込み同士の間隔を空ける
 const write = async (content: string) => {
   await new Promise((r) => setTimeout(r, 100))
@@ -29,8 +27,6 @@ test.beforeEach(async ({ page }) => {
   for (let i = 0; i < 3; i++) await button.click()
   await expect(button).toHaveText('Count is 3')
 })
-
-test.afterAll(() => writeFileSync(FILE, BASE))
 
 test('CSS だけの変更: スタイルが変わり、モジュール再評価も再レンダーも起きない', async ({ page }) => {
   const button = page.getByRole('button')

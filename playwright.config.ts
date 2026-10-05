@@ -6,7 +6,8 @@ export default defineConfig({
   workers: 1,
   use: { baseURL: 'http://localhost:5198' },
   webServer: {
-    command: 'pnpm exec vite e2e/app --config vite.config.ts --port 5198 --strictPort',
+    // Counter.tsx は gitignore されているので、起動前に元の内容から作る
+    command: 'cp e2e/app/Counter.base.tsx e2e/app/Counter.tsx && pnpm exec vite e2e/app --config vite.config.ts --port 5198 --strictPort',
     url: 'http://localhost:5198',
   },
 })

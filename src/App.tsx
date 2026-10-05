@@ -54,7 +54,7 @@ function App() {
             </li>
           </ul>
         </div>
-        <div>
+        <div className={styles.social}>
           <svg className={styles.icon} role="presentation" aria-hidden="true">
             <use href="/icons.svg#social-icon"></use>
           </svg>
@@ -122,7 +122,15 @@ function App() {
 export default App
 
 const styles = css`
+  @media (prefers-color-scheme: dark) {
+    .social .buttonIcon {
+      filter: invert(1) brightness(2);
+    }
+  }
+
   .counter {
+    font-family: var(--mono);
+    display: inline-flex;
     font-size: 16px;
     padding: 5px 10px;
     border-radius: 5px;

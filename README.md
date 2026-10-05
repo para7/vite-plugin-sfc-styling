@@ -42,7 +42,8 @@ export default defineConfig({
 - `css` はトップレベルの `const` 宣言でのみ使えます (`export const` も可)。関数の中や式の中では使えません
 - `${}` による補間は使えません。値を共有したいときは CSS カスタムプロパティ (`var(--gap)`) を使ってください
 - 1 ファイルに複数書けます。ブロックごとに別のスコープになります
-- 中身はプレーンな CSS です。ネストはブラウザのネイティブ CSS Nesting で書けます。`:global`、`composes`、`@import`、`url()` は、その `.tsx` ファイルからの相対パスで解決されます
+- 中身はプレーンな CSS で、CSS Modules の機能 (`:global`、`composes` など) も使えます。ネストはブラウザのネイティブ CSS Nesting で書けます
+- `composes ... from`、`@import`、`url()` のパスは、その `.tsx` ファイルからの相対パスで解決されます
 
 既知の制約: 内側のスコープで `css` という名前をシャドーイングすると (`function f(css) { ... }` など)、誤ってエラーになります。
 

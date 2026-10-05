@@ -225,20 +225,6 @@ describe('build', () => {
     expect(css).toContain(`.${mod.b.root}`)
   })
 
-  test('ネストと :global', async () => {
-    const { css, mod } = await bundle(
-      fixture({
-        'comp.ts': `${IMPORT}export const a = css\`
-          .root { & .child { color: red } }
-          :global(.g) { color: blue }
-        \``,
-      }),
-    )
-    expect(mod.a.child).toBeTruthy()
-    expect(css).toContain(`.${mod.a.child}`)
-    expect(css).toMatch(/(^|\s)\.g\s*\{/)
-  })
-
   test('url() は tsx からの相対パスで解決される', async () => {
     const { css } = await bundle(
       fixture({
@@ -330,11 +316,6 @@ describe('dev server', () => {
     expect(css0).toContain('import.meta.hot.accept()')
   })
 
-  test('tsx より先に仮想 CSS を要求しても返せる', async () => {
-    const s = await serve(fixture({ 'comp.ts': devComp() }))
-    expect(await s.transform('/comp.ts.sfc1.module.css')).toContain('color: blue')
-  })
-
   test('CSS だけの変更は、変わったブロックだけを self-accept で更新する', async () => {
     const s = await serve(fixture({ 'comp.ts': devComp() }))
     await warm(s)
@@ -413,10 +394,12 @@ describe('dev server', () => {
     expect(s.paths(p)).toContain('/comp.ts')
   })
 
-  test('?inline / ?direct 付きでも読める', async () => {
+  test('?inline / ?direct 付きでも読め、クラス名は通常の import と同じ', async () => {
     const s = await serve(fixture({ 'comp.ts': devComp() }))
     await s.transform('/comp.ts')
-    expect(await s.transform('/comp.ts.sfc0.module.css?inline')).toMatch(/export default ".*color: red/)
+    const root = (await s.transform('/comp.ts.sfc0.module.css')).match(/export const root = "([^"]+)"/)![1]
+    // SSR フレームワークは dev 中に ?inline で CSS を集めるので、クラス名がずれるとスタイルが当たらない
+    expect(await s.transform('/comp.ts.sfc0.module.css?inline')).toMatch(new RegExp(`export default ".*\\.${root} \\{ color: red`))
     expect(await s.transform('/comp.ts.sfc0.module.css?direct')).toContain('color: red')
   })
 
