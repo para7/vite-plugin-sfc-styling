@@ -1,13 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { parseAst, type Plugin } from 'vite'
+import { isFileServingAllowed, normalizePath, parseAst, type Plugin, type ResolvedConfig } from 'vite'
 
 // const styles = css`.root { color: red }` を、同じファイルから派生した
 // 仮想 CSS Module (`App.tsx.sfc0.module.css`) の import に置き換える。
 // id をクエリ形式 (`App.tsx?...`) にしないのは、vite:oxc 等がクエリを除いた `.tsx` を見て JS として変換してしまうため。
 
 const MODULE_ID = 'virtual:sfc-css'
-const VIRTUAL_RE = /^(.*)\.sfc(\d+)\.module\.css$/
+// `?inline` `?direct` 等のクエリ付きでも来る
+const VIRTUAL_RE = /^(.*)\.sfc(\d+)\.module\.css(?:\?.*)?$/
 const FILE_RE = /\.[cm]?[jt]sx?$/
 const virtualId = (file: string, i: number) => `${file}.sfc${i}.module.css`
 
@@ -26,6 +27,7 @@ export function transformSfcCss(code: string, file: string) {
         if (s.type === 'ImportSpecifier' && s.imported.name === 'css') names.add(s.local.name)
   if (!names.size) return null
 
+  // 名前で判定するので、内側のスコープで css をシャドーイングすると誤ってエラーになる (既知の制約)
   const isCss = (n: Node | null) =>
     n?.type === 'TaggedTemplateExpression' && n.tag.type === 'Identifier' && names.has(n.tag.name)
 
@@ -64,26 +66,36 @@ export function transformSfcCss(code: string, file: string) {
     const newlines = code.slice(start, end).split('\n').length - 1
     out = out.slice(0, start) + `__sfc_css_${i}` + '\n'.repeat(newlines) + out.slice(end)
   }
-  // import は 1 行目の先頭に詰めて行番号を保つ
+  // import は先頭の directive ('use client' 'use no memo' 等) の直後に、改行せずに詰めて行番号を保つ。
+  // directive より前に置くと directive として扱われなくなる
+  let at = 0
+  for (const n of ast.body) {
+    if (n.type !== 'ExpressionStatement' || !n.directive) break
+    at = n.end
+  }
   const imports = blocks.map((_, i) => `import __sfc_css_${i} from ${JSON.stringify(virtualId(file, i))};`).join('')
   // raw を使う: CSS のエスケープ (content: "\201C" 等) を書いたまま渡すため
   const css = blocks.map((b) => b.quasi.quasis[0].value.raw as string)
-  return { code: imports + out, css }
+  return { code: out.slice(0, at) + (at ? ';' : '') + imports + out.slice(at), css }
 }
 
 // string-hash (postcss-modules が使うもの) と同じ
-const hash = (s: string) => {
+const stringHash = (s: string) => {
   let h = 5381
   for (let i = s.length; i; ) h = (h * 33) ^ s.charCodeAt(--i)
-  return (h >>> 0).toString(36).slice(0, 5)
+  return h >>> 0
 }
 
 export default function sfcCss(): Plugin[] {
   const cssByFile = new Map<string, string[]>()
   const jsByFile = new Map<string, string>()
-  let root = ''
+  let config: ResolvedConfig
+  // CSS だけの HMR は、クラス名が CSS の内容に依存しないことが前提
+  let stableNames = true
 
   const run = (code: string, file: string) => {
+    // 失敗・対象外になったら前回の JS を無効化し、次の hotUpdate を必ず全体更新にする
+    if (jsByFile.has(file)) jsByFile.set(file, '')
     const r = transformSfcCss(code, file)
     if (r) {
       cssByFile.set(file, r.css)
@@ -99,17 +111,26 @@ export default function sfcCss(): Plugin[] {
 
       config(c) {
         const m = c.css?.modules
+        const lc = c.css?.lightningcss?.cssModules
+        stableNames =
+          !(m && typeof m.generateScopedName === 'function') &&
+          !(typeof lc === 'object' && lc.pattern?.includes('[content-hash]'))
         if (c.css?.transformer === 'lightningcss' || m === false || m?.generateScopedName) return
         // Vite 既定 (postcss-modules) のクラス名は CSS 内容のハッシュで、編集のたびに変わるため
         // CSS だけの HMR ができない。仮想 CSS は「ファイル + ブロック番号」由来の安定名にする。
         // それ以外は Vite 既定 (makeDefaultScopedNameGenerator) と同じ式。
+        const prefix = m?.hashPrefix ?? ''
         return {
           css: {
             modules: {
               generateScopedName(name: string, filename: string, css: string) {
-                if (VIRTUAL_RE.test(filename)) return `_${name}_${hash(path.relative(root, filename))}`
-                const line = css.slice(0, css.indexOf(`.${name}`)).split(/[\r\n]/).length
-                return `_${name}_${hash(css)}_${line}`
+                if (VIRTUAL_RE.test(filename)) {
+                  const rel = path.relative(config.root, filename.split('?')[0])
+                  return `_${name}_${stringHash(prefix + rel).toString(36)}`
+                }
+                const i = css.indexOf(`.${name}`)
+                const line = (i < 0 ? '' : css.slice(0, i)).split(/[\r\n]/).length
+                return `_${name}_${stringHash(prefix + css).toString(36).slice(0, 5)}_${line}`
               },
             },
           },
@@ -117,16 +138,19 @@ export default function sfcCss(): Plugin[] {
       },
 
       configResolved(c) {
-        root = c.root
+        config = c
       },
 
       resolveId(id) {
         if (id === MODULE_ID) return '\0' + MODULE_ID
         const m = id.match(VIRTUAL_RE)
         if (!m) return
-        // transform が出力する絶対パスに加え、dev では `/src/...` や `/@fs/...` の URL 形式でも来る
-        if (id.startsWith('/@fs/')) return id.slice(4)
-        return existsSync(m[1]) ? id : root + id
+        // transform が出力した絶対パス。仮想 CSS は実在しないので Vite は /@fs/ を付けず、
+        // dev でも root 外のファイルはこの形のまま URL になる
+        if (cssByFile.has(m[1])) return id
+        // dev の root 相対 URL (`/src/App.tsx.sfc0.module.css`)。読んでよいかは load で判定する
+        const abs = normalizePath(path.join(config.root, id))
+        if (existsSync(abs.match(VIRTUAL_RE)![1])) return abs
       },
 
       load(id) {
@@ -136,8 +160,14 @@ export default function sfcCss(): Plugin[] {
         const m = id.match(VIRTUAL_RE)
         if (!m) return
         const [, file, index] = m
-        // dev サーバー再起動直後など、tsx より先に CSS が要求された場合
-        if (!cssByFile.has(file)) run(readFileSync(file, 'utf8'), file)
+        if (!cssByFile.has(file)) {
+          // dev サーバー再起動直後など、tsx より先に CSS が要求された場合。
+          // URL 由来の id (`/@id/<root>/../x` のような未解決のものも含む) が来るので、
+          // 正規化済みで、Vite 自身が配信を許すソースファイルだけを読む
+          if (!FILE_RE.test(file) || file !== normalizePath(path.resolve(file))) return
+          if (!isFileServingAllowed(config, file)) return
+          run(readFileSync(file, 'utf8'), file)
+        }
         return cssByFile.get(file)?.[Number(index)] ?? ''
       },
 
@@ -147,12 +177,14 @@ export default function sfcCss(): Plugin[] {
       },
 
       async hotUpdate({ file, modules, read }) {
-        if (this.environment.name !== 'client') return
         const prev = jsByFile.get(file)
         if (prev === undefined) return
         const graph = this.environment.moduleGraph
         const cssMods = []
         for (let i = 0, m; (m = graph.getModuleById(virtualId(file, i))); i++) cssMods.push(m)
+        // 仮想 CSS は file が別 (`X.tsx.sfc0.module.css`) なので、既定の modules に含まれない。
+        // キャッシュの更新は client 環境の呼び出しだけで行う (二重に run すると prev がずれる)
+        if (this.environment.config.consumer !== 'client') return [...modules, ...cssMods]
         const prevCss = cssByFile.get(file)!
         let r
         try {
@@ -160,7 +192,7 @@ export default function sfcCss(): Plugin[] {
         } catch {
           return // 書きかけの構文エラー等は通常フローでエラー表示させる
         }
-        if (r?.code !== prev) return [...modules, ...cssMods]
+        if (r?.code !== prev || !stableNames) return [...modules, ...cssMods]
         // css`` の中身だけが変わった (JS 部分が同一) なら、変わった仮想 CSS だけを更新する。
         // vite:css-analysis が CSS Module の isSelfAccepting を毎回 false にするので、ここで立て直す
         const changed = cssMods.filter((_, i) => prevCss[i] !== r.css[i])
@@ -172,11 +204,12 @@ export default function sfcCss(): Plugin[] {
       // CSS Module は exports を持つので Vite は self-accept させない (importer の再レンダーになる)。
       // 仮想 CSS はクラス名が安定しているので、差し替えても importer 側の参照は壊れない。
       // ここではクライアント側の accept 登録だけを行い、サーバー側の判定は hotUpdate で行う。
+      // import.meta.hot の無い ssrLoadModule でも動くようにガードする
       name: 'sfc-css:hmr',
       apply: 'serve',
       enforce: 'post',
       transform(code, id) {
-        if (VIRTUAL_RE.test(id)) return code + '\nimport.meta.hot.accept()'
+        if (VIRTUAL_RE.test(id)) return code + '\nif (import.meta.hot) import.meta.hot.accept()'
       },
     },
   ]
