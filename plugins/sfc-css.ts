@@ -186,7 +186,8 @@ export default function sfcCss(): Plugin[] {
       transform: {
         filter: { id: { include: FILE_RE, exclude: /\/node_modules\// }, code: MODULE_ID },
         handler(code, id) {
-          return run(code, id)?.code
+          // クエリを残すと仮想 CSS の id が `x.tsx?...module.css` になり、クエリ前の .tsx として JS 変換されてしまう
+          return run(code, id.split('?')[0])?.code
         },
       },
 
