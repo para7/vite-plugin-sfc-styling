@@ -128,6 +128,13 @@ describe('build', () => {
     expect(after.b.root).toBe(before.b.root)
   })
 
+  test('クエリ付き id (`?pick=...&lang.tsx` 等) で読まれても、クエリを除いたファイルと同じ結果になる', async () => {
+    const plain = (await bundle(fixture({ 'c.ts': comp(), 'comp.ts': `export * from './c.ts'` }))).mod
+    const { css, mod } = await bundle(fixture({ 'c.ts': comp(), 'comp.ts': `export * from './c.ts?pick=a&lang.ts'` }))
+    expect(mod.a.root).toBe(plain.a.root)
+    expect(css).toMatch(new RegExp(`\\.${mod.a.root}\\s*\\{\\s*color: red`))
+  })
+
   test('クラス名は root からの相対パス由来: 別 root でも同じ、別ファイルなら違う', async () => {
     const a = (await bundle(fixture({ 'comp.ts': comp() }))).mod
     const b = (await bundle(fixture({ 'comp.ts': comp() }))).mod
