@@ -1,0 +1,26 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - plugins/sfc-css.ts
+      - src/sfc-css.d.ts
+      - .github/workflows/release.yml
+
+permissions:
+  contents: write
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest plugins/sfc-css.ts src/sfc-css.d.ts \
+            --target "$GITHUB_SHA" --latest \
+            --title "latest (master)" \
+            --notes "master ${GITHUB_SHA::7} 時点のファイルです。"
+        env:
+          GH_TOKEN: ${{ github.token }}
