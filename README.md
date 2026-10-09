@@ -53,6 +53,10 @@ export default defineConfig({
 - **クラス名**: `css.modules.generateScopedName` を指定していなければ、プラグインが設定を入れます。`css` ブロックのクラス名は「ファイルのパス + ブロック番号」から決まり、CSS を編集しても変わりません。通常の `.module.css` は Vite 既定と同じ命名のままです。`generateScopedName` を関数で指定している場合は、クラス名が変わりうるので、CSS だけの差し替えではなく全体の更新になります
 - `'use client'` などの directive、SSR (`ssrLoadModule` / module runner)、lightningcss に対応しています
 
+## エディタ
+
+VS Code では、styled-components 向けの拡張機能 [vscode-styled-components](https://marketplace.visualstudio.com/items?itemName=styled-components.vscode-styled-components) を入れると、`css` の中身が CSS としてハイライトされ、補完も効きます。色付けだけでよければ、より軽い [es6-string-css](https://marketplace.visualstudio.com/items?itemName=bashmish.es6-string-css) でも構いません。
+
 ## 開発
 
 ```sh
