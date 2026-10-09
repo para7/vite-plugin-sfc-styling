@@ -26,11 +26,11 @@ const styles = css`
 - `plugins/sfc-css.ts`: プラグイン本体
 - `src/sfc-css.d.ts`: `virtual:sfc-css` の型。tsconfig の `include` に入る場所に置いてください
 
-master の最新版は [Releases](https://github.com/para7/vite-plugin-react-sfc/releases/latest) からダウンロードできます。
+master の最新版は [Releases](https://github.com/para7/vite-plugin-sfc-styling/releases/latest) からダウンロードできます。
 
 ```sh
-curl -LO https://github.com/para7/vite-plugin-react-sfc/releases/latest/download/sfc-css.ts
-curl -LO https://github.com/para7/vite-plugin-react-sfc/releases/latest/download/sfc-css.d.ts
+curl -LO https://github.com/para7/vite-plugin-sfc-styling/releases/latest/download/sfc-css.ts
+curl -LO https://github.com/para7/vite-plugin-sfc-styling/releases/latest/download/sfc-css.d.ts
 ```
 
 ```ts
