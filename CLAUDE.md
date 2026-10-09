@@ -4,7 +4,7 @@
 
 ## 構成
 
-- `plugins/sfc-css.ts`: プラグイン本体。設計判断の理由はこのファイルのコメントに書く (単体でコピーして持ち運ぶので、正本はコード側)
+- `plugins/sfc-css.ts`: プラグイン本体。設計判断の理由はこのファイルのコメントに書く (単体でコピーして持ち運ぶので、正本はコード側)。README.md は利用者向けの仕様、CLAUDE.md は開発時の注意だけを書き、互いに同じ内容を持たない
 - `src/sfc-css.d.ts`: `virtual:sfc-css` の型
 - `plugins/sfc-css.test.ts`: vitest。transform の単体テスト、build、dev サーバーでの HMR の判定
 - `e2e/`: playwright。専用アプリ `e2e/app/` で実ブラウザの HMR を確認する。テストは gitignore された `Counter.tsx` を書き換え、元の内容は `Counter.base.tsx`
@@ -16,6 +16,7 @@
 - プラグインは他のプロジェクトへ 1 ファイルでコピーして使う前提。Vite 以外の依存を足さず、ファイルも分けない
 - `resolveId` / `load` は transform 済みのファイルの仮想 CSS しか受け付けない。`server.fs.allow` を回避されないためなので、緩めないこと
 - Vite を上げたら、まず「CSS だけの HMR」が壊れていないか確認する (`pnpm test:e2e`)。Vite の内部挙動 (`vite:css-analysis` による `isSelfAccepting` の上書きなど) に依存している
+- 静的検査は警告だけにし、見逃しより誤検知を避けることを優先する。CSS Modules の export のキーの実際の挙動 (postcss / lightningcss の差) を確かめるときは、Vite の `preprocessCSS` の `modules` を見るのが手早い
 
 ## コマンド
 
@@ -28,6 +29,6 @@
 - chokidar は同じパスへの change を 50ms 以内だと捨てる (Vite 本体の挙動)。E2E の書き込み間隔を詰めないこと
 - 修正を入れたら、修正前のコードではテストが落ちることも確認する (テストが意味のある検査になっているかを見るため)
 
-## 今後 (フェーズ2)
+## 今後
 
-- `styles.xxx` の静的な参照と CSS のクラスを transform 時に突き合わせ、未定義の参照と未使用のクラスを警告する。`styles[key]` のような動的アクセスや、`styles` を丸ごと渡している場合は、そのファイルの検査をスキップする。警告にするかエラーにするかは未定
+- README.md の「今後の予定」を参照

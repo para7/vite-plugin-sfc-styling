@@ -57,6 +57,28 @@ export default defineConfig({
 
 VS Code では、styled-components 向けの拡張機能 [vscode-styled-components](https://marketplace.visualstudio.com/items?itemName=styled-components.vscode-styled-components) を入れると、`css` の中身が CSS としてハイライトされ、補完も効きます。色付けだけでよければ、より軽い [es6-string-css](https://marketplace.visualstudio.com/items?itemName=bashmish.es6-string-css) でも構いません。
 
+## 静的検査
+
+transform のときに、`css` ブロックごとに JS 側の参照と CSS 側のクラスを突き合わせ、警告を出します (ビルドは止めません)。
+
+```
+[plugin sfc-css] /path/to/src/App.tsx:26 styles.countr は css`` (124 行目) に定義されていません
+[plugin sfc-css] /path/to/src/App.tsx:124 styles の未使用のクラス: .counter
+```
+
+- **未定義の参照**: `styles.foo` と書いているのに、CSS 側に `foo` という名前がどこにもない。参照箇所の行を出します。CSS Modules は keyframes 名・`@value`・`:export` (lightningcss では grid や container の名前なども) をキーにするので、クラスに限らず名前が現れれば定義済みとみなします。そのため `styles.red` は `color: red` があると見逃します
+- **未使用のクラス**: CSS 側に `.bar` があるのに、そのファイルのどこからも参照されていない。`css` ブロックの行を出します。`composes` で同じブロックから使っているクラスと、keyframes の名前は対象外です
+
+静的な参照として数えるのは `styles.foo`、`styles['foo-bar']`、`const { foo } = styles` の 3 つだけです。判定できないときは、誤検知を出さないように検査をスキップします。
+
+- `styles[key]`、関数へ渡す、スプレッド、`...rest` を含む分割代入など、それ以外の使い方が 1 つでもあるブロックは検査しません。`styles.toString()` などの `Object.prototype` のプロパティや、内側のスコープで同じ名前をシャドーイングしている場合も同じです
+- `export const` しているブロックは、他のファイルから使われうるので未使用の検査をしません (`export { styles }` は上の「それ以外の使い方」なので、検査ごとしません)
+- `@import` を含むブロックは、取り込んだ CSS のクラスもキーになるので未定義の検査をしません
+- `:global(.x)` と `:global .x` のクラスはスコープ外なので数えません。エスケープを含むクラス名 (`.sm\:p-4`) や、括弧が 2 段以上ネストした `:global()` があるブロックは検査しません
+- `css.modules` の `localsConvention`・`exportGlobals`・`scopeBehaviour: 'global'`・`globalModulePaths` を指定している場合は、キーが変わるので検査しません (lightningcss では Vite がこれらの設定を無視するので検査します)
+
+dev では `[sfc-css]` を付けて Vite のロガーに出します。ファイルごとに前回と警告の内容が変わったときだけ出します (CSS だけの HMR でも出ます)。
+
 ## 開発
 
 ```sh
@@ -75,17 +97,18 @@ pnpm bench:dev  # dev サーバーの起動・初回ロード・CSS だけの HM
 
 | | `css` | `.module.css` |
 |---|---|---|
-| `vite build` | 566〜612ms | 499〜574ms |
-| dev 初回ロード | 2477〜2505ms | 2396〜2439ms |
-| dev 2 回目ロード (サーバーのキャッシュあり) | 1738〜1774ms | 1707〜1846ms |
-| CSS だけの HMR | 33ms | 67〜83ms |
+| `vite build` | 581〜593ms | 523〜540ms |
+| dev 初回ロード | 2307〜2458ms | 2318〜2391ms |
+| dev 2 回目ロード (サーバーのキャッシュあり) | 1677〜1732ms | 1706〜1794ms |
+| CSS だけの HMR | 33〜35ms | 78〜81ms |
 
-- プラグイン自身の transform は 1 ファイルあたり約 0.12ms (500 ファイルで約 60ms)。時間はファイル数に比例します (2000 ファイルでの build は 2348ms 対 2099ms)
+- プラグイン自身の transform は 1 ファイルあたり約 0.15ms (500 ファイルで約 75ms)。静的検査の分は 1 ファイルあたり約 0.01〜0.03ms です。時間はファイル数に比例します (2000 ファイルでの build は 2241ms 対 1863ms)
 - dev の初回ロードの大半は、モジュール約 1000 個の取得です。モジュール数はどちらも同じです
 - HMR は `css` のほうが速くなります。`.module.css` は import 元の `.tsx` まで更新が伝わり React が再描画しますが、`css` は変わった CSS だけを差し替えます
 - 未計測: 1 ファイルが大きいコンポーネント (生成するのは 25 行程度で、プラグインは `.tsx` 全体をパースするのでファイルの大きさに比例して遅くなる)、React Compiler を入れた構成、JS を変えたときの HMR
 
 ## 今後の予定
 
-- 静的検査: `styles.xxx` の参照と CSS 側のクラスを突き合わせて、未定義の参照と未使用のクラスを警告する
+- 静的検査の警告をエラーにするオプション (CI で落としたくなったら)
+- `localsConvention` を指定している場合の静的検査
 

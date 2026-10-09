@@ -32,6 +32,48 @@ const virtualId = (file: string, i: number) => `${file}.sfc${i}.module.css`
 // oxc ESTree。必要なプロパティしか触らないので緩く型付けする
 type Node = { type: string; start: number; end: number; [k: string]: any }
 
+// クラス名 (CSS の ident)。`\` のエスケープも拾う
+const IDENT = String.raw`(?:--|-?(?:[a-zA-Z_\x80-\uffff]|\\[^]))(?:[\w\x80-\uffff-]|\\[^])*`
+const CLASS_RE = new RegExp(`\\.(${IDENT})`, 'g')
+
+// css`` の中身から、ローカルのクラスを軽い走査で集める (依存を足さず transform を遅くしないため、CSS のパースはしない)。
+// 判定に自信がないときは null を返し、そのブロックは検査しない
+function scanCss(raw: string) {
+  const text = raw.replace(/\/\*[^]*?\*\//g, ' ')
+  // 文字列と url() の中も見ない。quoted の url("a(1).png") は文字列として消す (`)` で切ると後ろがずれる)
+  const s = text.replace(/"(?:\\[^]|[^"\\])*"|'(?:\\[^]|[^'\\])*'|url\([^)"']*\)/gi, ' ')
+  const classes = new Set<string>()
+  const composed = new Set<string>()
+  // `{` の直前 (前の `{` `}` `;` から) がセレクタか at-rule の prelude。宣言の値は見ないので `.5em` 等を拾わない。
+  // 正規表現 /([^{};]*)\{/g で拾うと宣言の中でバックトラックして数倍遅い
+  for (const piece of s.split('{').slice(0, -1)) {
+    const prelude = piece.slice(Math.max(piece.lastIndexOf(';'), piece.lastIndexOf('}')) + 1)
+    const at = prelude.match(/^\s*@([\w-]+)/)
+    // @scope の prelude のクラスはローカル化される。他の at-rule (@supports selector() 等) はされない
+    if (at && at[1] !== 'scope') continue
+    // :global(.x) と、`:global .x` から `:local` かセレクタの終わりまでは対象外
+    const sel = prelude
+      .replace(/:global\((?:[^()]|\([^()]*\))*\)/g, ' ')
+      .replace(/:global(?![\w(-])(?:(?!:local(?![\w-]))[^])*/g, ' ')
+    // 括弧が 2 段以上ネストした :global() は上で消せない
+    if (sel.includes(':global(')) return null
+    for (const [, c] of sel.matchAll(CLASS_RE)) {
+      if (c.includes('\\')) return null
+      classes.add(c)
+    }
+  }
+  // compose-with は composes の別名 (postcss-modules-scope)
+  for (const [, v] of s.matchAll(/[{};]\s*compos(?:es|e-with)\s*:([^;}]*)/g))
+    if (!/\sfrom\s/.test(v + ' ')) for (const c of v.trim().split(/\s+/)) composed.add(c)
+  // export のキーはクラス以外にも、keyframes 名・@value・:export (postcss)、grid や container の名前 (lightningcss) など
+  // CSS に書いた名前から増える。未定義の判定では、参照キーが CSS のどこか (文字列含む) に名前として現れれば定義済みとみなす。
+  // @import は取り込んだ CSS のクラスもキーになるので、判定できない
+  const mentioned = (k: string) =>
+    classes.has(k) ||
+    new RegExp(`(?<![\\w\\x80-\\uffff-])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w\\x80-\\uffff-])`).test(text)
+  return { classes, composed, mentioned, keysUnknown: /@import/i.test(s) }
+}
+
 export function transformSfcCss(code: string, file: string) {
   if (!code.includes(MODULE_ID)) return null
   const lang = file.match(FILE_RE)![0].replace(/^\.[cm]?/, '') as 'js' | 'jsx' | 'ts' | 'tsx'
@@ -50,19 +92,44 @@ export function transformSfcCss(code: string, file: string) {
 
   // 許可するのはトップレベルの `const x = css`...`` (export 付き含む) のみ
   const allowed = new Set<Node>()
+  type Binding = { id: Node; init: Node; exported: boolean; keys: [string, Node][]; dynamic: boolean }
+  const bindings = new Map<string, Binding>()
   for (let n of ast.body) {
-    if (n.type === 'ExportNamedDeclaration' && n.declaration) n = n.declaration
+    const exported = n.type === 'ExportNamedDeclaration'
+    if (exported && n.declaration) n = n.declaration
     if (n.type === 'VariableDeclaration' && n.kind === 'const')
-      for (const d of n.declarations) if (isCss(d.init)) allowed.add(d.init)
+      for (const d of n.declarations)
+        if (isCss(d.init)) {
+          allowed.add(d.init)
+          if (d.id.type === 'Identifier') bindings.set(d.id.name, { id: d.id, init: d.init, exported, keys: [], dynamic: false })
+        }
   }
 
+  const keyOf = (k: Node, computed: boolean) =>
+    !computed && k.type === 'Identifier' ? (k.name as string) : k.type === 'Literal' && typeof k.value === 'string' ? k.value : undefined
+  // 名前で判定するので、内側のスコープで x をシャドーイングした場合も、その宣言 (引数・分割代入の値など) が
+  // 「静的でない使い方」として dynamic になり、誤検知せずに検査をスキップする
+  const addRef = (b: Binding, node: Node, p: Node) => {
+    if (node === b.id) return
+    if (!p.computed && (p.type === 'MemberExpression' ? p.property === node : p.key === node && !p.shorthand)) return
+    if (p.type === 'MemberExpression' && p.object === node) {
+      const k = keyOf(p.property, p.computed)
+      if (k !== undefined) return void b.keys.push([k, p])
+    }
+    if (p.type === 'VariableDeclarator' && p.init === node && p.id.type === 'ObjectPattern') {
+      const keys = p.id.properties.map((q: Node) => [q.type === 'Property' && keyOf(q.key, q.computed), q])
+      if (keys.every(([k]: [unknown]) => typeof k === 'string')) return void b.keys.push(...keys)
+    }
+    b.dynamic = true
+  }
+
+  const lineOf = (n: Node) => code.slice(0, n.start).split('\n').length
   const fail = (n: Node, msg: string) => {
-    const line = code.slice(0, n.start).split('\n').length
-    throw new Error(`[sfc-css] ${file}:${line} ${msg}`)
+    throw new Error(`[sfc-css] ${file}:${lineOf(n)} ${msg}`)
   }
   const blocks: Node[] = []
-  const walk = (n: unknown): void => {
-    if (Array.isArray(n)) return n.forEach(walk)
+  const walk = (n: unknown, parent: Node): void => {
+    if (Array.isArray(n)) return n.forEach((c) => walk(c, parent))
     if (!n || typeof n !== 'object') return
     const node = n as Node
     if (isCss(node)) {
@@ -71,10 +138,28 @@ export function transformSfcCss(code: string, file: string) {
       blocks.push(node)
       return
     }
-    for (const k in node) walk(node[k])
+    if (node.type === 'Identifier' && bindings.has(node.name)) addRef(bindings.get(node.name)!, node, parent)
+    for (const k in node) walk(node[k], node)
   }
-  walk(ast.body)
+  walk(ast.body, ast)
   blocks.sort((a, b) => a.start - b.start)
+
+  const warnings: string[] = []
+  for (const [name, b] of bindings) {
+    // s.toString() 等は正しいアクセスだが、クラスのキーと区別できない
+    if (b.dynamic || b.keys.some(([k]) => k in Object.prototype)) continue
+    const css = scanCss(b.init.quasi.quasis[0].value.raw)
+    if (!css) continue
+    const at = lineOf(b.init)
+    if (!css.keysUnknown)
+      for (const [k, n] of b.keys)
+        if (!css.mentioned(k)) warnings.push(`${file}:${lineOf(n)} ${name}.${k} は css\`\` (${at} 行目) に定義されていません`)
+    // export const したブロックは他のファイルから参照されうる
+    if (b.exported) continue
+    const used = new Set(b.keys.map(([k]) => k))
+    const unused = [...css.classes].filter((c) => !used.has(c) && !css.composed.has(c))
+    if (unused.length) warnings.push(`${file}:${at} ${name} の未使用のクラス: ${unused.map((c) => '.' + c).join(', ')}`)
+  }
 
   // 後ろから置換して offset を保つ。改行数を維持して行番号をずらさない
   let out = code
@@ -93,7 +178,7 @@ export function transformSfcCss(code: string, file: string) {
   const imports = blocks.map((_, i) => `import __sfc_css_${i} from ${JSON.stringify(virtualId(file, i))};`).join('')
   // raw を使う: CSS のエスケープ (content: "\201C" 等) を書いたまま渡すため
   const css = blocks.map((b) => b.quasi.quasis[0].value.raw as string)
-  return { code: out.slice(0, at) + (at ? ';' : '') + imports + out.slice(at), css }
+  return { code: out.slice(0, at) + (at ? ';' : '') + imports + out.slice(at), css, warnings }
 }
 
 // string-hash (postcss-modules が使うもの) と同じ
@@ -106,11 +191,17 @@ const stringHash = (s: string) => {
 export default function sfcCss(): Plugin[] {
   const cssByFile = new Map<string, string[]>()
   const jsByFile = new Map<string, string>()
+  // 最後に出した警告。同じ内容なら出さない (client/SSR の二重 transform や、行のずれない JS の編集で重複させない)
+  const warnedByFile = new Map<string, string>()
+  let check = true
   let config: ResolvedConfig
   // CSS だけの HMR は、クラス名が CSS の内容に依存しないことが前提
   let stableNames = true
 
-  const run = (code: string, file: string) => {
+  // dev で this.warn を使わないのは、警告のたびに画面をクリアして最後の 1 件しか残らないため
+  const warnDev = (m: string) => config.logger.warn(`[sfc-css] ${m}`, { timestamp: true })
+
+  const run = (code: string, file: string, warn: (msg: string) => void) => {
     // 失敗・対象外になったら前回の JS を無効化し、次の hotUpdate を必ず全体更新にする
     if (jsByFile.has(file)) jsByFile.set(file, '')
     const r = transformSfcCss(code, file)
@@ -118,6 +209,11 @@ export default function sfcCss(): Plugin[] {
       cssByFile.set(file, r.css)
       jsByFile.set(file, r.code)
     }
+    // CSS だけの HMR では transform が走らないので、ここで出す
+    const ws = (check && r?.warnings) || []
+    const w = ws.join('\n')
+    if (w !== (warnedByFile.get(file) ?? '')) for (const m of ws) warn(m)
+    warnedByFile.set(file, w)
     return r
   }
 
@@ -156,6 +252,13 @@ export default function sfcCss(): Plugin[] {
 
       configResolved(c) {
         config = c
+        // localsConvention はキーを変換し (camelCase は lodash.camelCase 相当で、関数指定もある)、
+        // exportGlobals・scopeBehaviour・globalModulePaths はどのクラスがキーになるかを変える。
+        // 再現すると誤検知の余地が残るので検査しない。lightningcss では Vite がこれらの設定を無視する
+        const m = c.css.modules
+        check =
+          c.css.transformer === 'lightningcss' ||
+          !(m && (m.localsConvention || m.exportGlobals || m.scopeBehaviour === 'global' || m.globalModulePaths?.length))
       },
 
       resolveId(id) {
@@ -187,7 +290,7 @@ export default function sfcCss(): Plugin[] {
         filter: { id: { include: FILE_RE, exclude: /\/node_modules\// }, code: MODULE_ID },
         handler(code, id) {
           // クエリを残すと仮想 CSS の id が `x.tsx?...module.css` になり、クエリ前の .tsx として JS 変換されてしまう
-          return run(code, id.split('?')[0])?.code
+          return run(code, id.split('?')[0], config.command === 'build' ? (m) => this.warn(m) : warnDev)?.code
         },
       },
 
@@ -203,7 +306,7 @@ export default function sfcCss(): Plugin[] {
         const prevCss = cssByFile.get(file)!
         let r
         try {
-          r = run(await read(), file)
+          r = run(await read(), file, warnDev)
         } catch {
           return // 書きかけの構文エラー等は通常フローでエラー表示させる
         }

@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { build, createServer, mergeConfig, parseAst, type InlineConfig, type Rolldown, type ViteDevServer } from 'vite'
+import { build, createServer, mergeConfig, parseAst, preprocessCSS, resolveConfig, type InlineConfig, type Rolldown, type ViteDevServer } from 'vite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import sfcCss, { transformSfcCss } from './sfc-css.ts'
 
@@ -57,6 +57,131 @@ describe('transformSfcCss', () => {
     ['export default', 'export default css`.x{}`', /トップレベル/],
   ])('違反はエラー: %s', (_, body, re) => {
     expect(() => transformSfcCss(IMPORT + body, '/p/a.tsx')).toThrow(re)
+  })
+})
+
+describe('静的検査', () => {
+  const F = '/p/a.tsx'
+  // 警告を「行 本文」の形で返す
+  const lint = (body: string) => transformSfcCss(IMPORT + body, F)!.warnings.map((w) => w.replace(`${F}:`, ''))
+
+  test('静的な参照: x.foo / x["foo-bar"] / 分割代入のキー。未定義は参照の行、未使用はブロックの行', () => {
+    const src = [
+      `const A = () => <p className={s.root + s['foo-bar']} />`,
+      `const { kept, 'q-1': q } = s`,
+      `const B = () => <p className={s.titel} />`,
+      `const s = css\`.root{} .foo-bar{} .kept{} .q-1{} .unused{} .unused2{}\``,
+    ].join('\n')
+    expect(lint(src)).toEqual(['4 s.titel は css`` (5 行目) に定義されていません', '5 s の未使用のクラス: .unused, .unused2'])
+  })
+
+  test('未使用・未定義がなければ警告しない。ブロックごとに別々に判定する', () => {
+    expect(lint('const a = css`.x{}`\nconst b = css`.x{} .y{}`\nf(a.x, b.x, b.y)')).toEqual([])
+    expect(lint('const a = css`.x{}`\nconst b = css`.y{}`\nf(a.y, b.y)')).toEqual([
+      '4 a.y は css`` (2 行目) に定義されていません',
+      '2 a の未使用のクラス: .x',
+    ])
+  })
+
+  test.each([
+    ['x[key]', 's[key]'],
+    ['テンプレートリテラルのキー', 's[`a`]'],
+    ['関数へ渡す', 'f(s)'],
+    ['スプレッド', 'f({ ...s })'],
+    ['...rest を含む分割代入', 'const { a, ...rest } = s'],
+    ['計算されたキーの分割代入', 'const { [k]: v } = s'],
+    ['代入式の分割代入', 'let a; ({ a } = s)'],
+    ['別名で export', 'export { s }'],
+    ['型として参照', 'type T = keyof typeof s'],
+    ['as', 'f((s as any).a)'],
+    ['引数でシャドーイング', 'function g(s) { return s.nope }'],
+    ['分割代入でシャドーイング', 'function g(p) { const { s } = p; return s.nope }'],
+    ['catch でシャドーイング', 'try {} catch (s) { s.nope }'],
+    ['Object.prototype のプロパティ', 's.toString()'],
+  ])('静的でない使い方が 1 つでもあればそのブロックは検査しない: %s', (_, use) => {
+    expect(lint(`const s = css\`.a{} .unused{}\`\nf(s.a, s.typo)\n${use}`)).toEqual([])
+  })
+
+  test('同名のプロパティ名は参照とみなさない。optional chaining は静的な参照', () => {
+    expect(lint('const s = css`.a{} .b{}`\nf(s?.a, s?.["b"], s.typo, p.s, { s: 1 })\nclass C { s = 1 }\ninterface I { s: string }')).toEqual([
+      '3 s.typo は css`` (2 行目) に定義されていません',
+    ])
+  })
+
+  test('export したブロックは未定義だけを検査する', () => {
+    expect(lint('export const s = css`.a{} .unused{}`\nf(s.a, s.typo)')).toEqual(['3 s.typo は css`` (2 行目) に定義されていません'])
+  })
+
+  test('keyframes 名は未使用の対象にしない', () => {
+    expect(lint('const s = css`@keyframes fade { from { opacity: 0 } 12.5% { opacity: .5 } } .a { animation: fade 1s }`\nf(s.a)')).toEqual([])
+    expect(lint('const s = css`@-webkit-keyframes fade {} .a{}`\nf(s.a)')).toEqual([])
+  })
+
+  // keyframes 名・@value・:export (postcss)、grid / container / list-style の名前や dashedIdents (lightningcss) もキーになる
+  test('参照キーが CSS のどこか (文字列含む) に名前として現れれば未定義にしない', () => {
+    const css = [
+      '@keyframes "q1" {} @keyframes :local(q2) {} .a { animation: q3 1s; grid-template-areas: "q4 main"; list-style: q5 }',
+      '@value q6: red; :export { q7: v } .b { color: var(--q8) } .c-q9 {}',
+    ].join(' ')
+    expect(lint(`const s = css\`${css}\`\nf(s.a, s.b, s['c-q9'], s.q1, s.q2, s.q3, s.q4, s.q5, s.q6, s.q7, s['--q8'], s.q9, s.ma)`)).toEqual([
+      '3 s.q9 は css`` (2 行目) に定義されていません',
+      '3 s.ma は css`` (2 行目) に定義されていません',
+    ])
+  })
+
+  test(':global(.x) と :global .x はローカルのクラスではない', () => {
+    const css =
+      ':global(.g1) .a {} :global(.g2:not(.g3)) {} .b :global .g4 .g5 {} :local .c :global .g6 {} .d { :global .g7 {} .e {} } :global .g8 :local(.f) {}'
+    expect(lint(`const s = css\`${css}\`\nf(s.zz)`)).toEqual([
+      '3 s.zz は css`` (2 行目) に定義されていません',
+      '2 s の未使用のクラス: .a, .b, .c, .d, .e, .f',
+    ])
+  })
+
+  test('コメント・文字列・url() の中、宣言の値、@supports selector() はクラスとして拾わない', () => {
+    const css = `/* .c1 { } */ .a { content: ".c2 {"; background: url(x.c3.png); font: .5em/1.2 x } [title='.c4'] {} @supports selector(.c5) { .b {} }`
+    expect(lint(`const s = css\`${css}\`\nf(s.a, s.b)`)).toEqual([])
+    // quoted の url() の中の `)` で区切りを誤らず、後ろのクラスも拾う
+    const url = `.a { background: url("./img(1).png") } .b { background: url("data:image/svg+xml,<svg fill='rgb(0,0,0)'/>") } .c::before { content: "" }`
+    expect(lint(`const s = css\`${url}\``)).toEqual(['2 s の未使用のクラス: .a, .b, .c'])
+  })
+
+  test('ネスト・複合セレクタ・:is()・@scope・@media の中も拾う', () => {
+    const css = '.a { .b {} &.c {} } .d.e:is(.f, .g) {} @media (width > 1px) { .h {} } @scope (.i) to (.j) { .k {} } .--x {} .日本語 {}'
+    expect(lint(`const s = css\`${css}\``)).toEqual(['2 s の未使用のクラス: .a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .--x, .日本語'])
+  })
+
+  test('composes で同じブロックから使われているクラスは未使用にしない (from 付きは別ファイル)', () => {
+    expect(lint(`const s = css\`.base {} .ext {} .a { composes: base; } .b { composes: ext x from './x.css'; }\`\nf(s.a, s.b)`)).toEqual([
+      '2 s の未使用のクラス: .ext',
+    ])
+    // ネストした規則の後ろの composes と、別名の compose-with
+    expect(lint('const s = css`.p {} .q {} .a { .x {} composes: p } .b { compose-with: q }`\nf(s.a, s.b, s.x)')).toEqual([])
+  })
+
+  test('@import を含むブロックは未定義の検査をしない (取り込んだ CSS のクラスもキーになる)', () => {
+    for (const at of ['@import', '@IMPORT'])
+      expect(lint(`const s = css\`${at} './g.css'; .a{} .unused{}\`\nf(s.a, s.imported)`)).toEqual(['2 s の未使用のクラス: .unused'])
+  })
+
+  test('エスケープを含むクラス名や、括弧が 2 段以上ネストした :global() があれば、そのブロックは検査しない', () => {
+    expect(lint('const s = css`.sm\\:p-4 {} .unused {}`\nf(s.typo)')).toEqual([])
+    expect(lint('const s = css`:global(:is(.x:not(.y))) .a {} .unused {}`\nf(s.typo)')).toEqual([])
+  })
+
+  // Vite / lightningcss を上げたときに、export のキーの挙動の変化に気づくため
+  test.each(['postcss', 'lightningcss'] as const)('実際の export のキーをすべて参照すれば警告は出ない: %s', async (transformer) => {
+    const config = await resolveConfig({ configFile: false, logLevel: 'silent', css: { transformer } }, 'build')
+    const cases = [
+      '.a { color: red } .b { .c { color: red } &.d { color: red } } .e:is(.f, .g) { color: red } @media (width > 1px) { .h { color: red } }',
+      ':global(.g1) .a { color: red } .b { animation: fade 1s; background: url("x(1).png") } @keyframes fade { from { opacity: 0 } }',
+      '.a { grid-template-areas: "head main"; grid-template-columns: [ls] 1fr; container: side / size; list-style: cs } @counter-style cs { system: cyclic; symbols: "*" }',
+      '.base { color: red } .a { composes: base; color: blue } @scope (.s1) to (.s2) { .s3 { color: red } }',
+    ]
+    for (const css of cases) {
+      const keys = Object.keys((await preprocessCSS(css, '/x/a.module.css', config)).modules!)
+      expect(lint(`const s = css\`${css}\`\nf(${keys.map((k) => `s[${JSON.stringify(k)}]`).join(', ')})`), css).toEqual([])
+    }
   })
 })
 
@@ -186,6 +311,25 @@ describe('build', () => {
     expect(css).toContain('data:image/svg+xml')
   })
 
+  test('検査の警告を出す。キーやスコープを変える css.modules の設定があれば検査しない', async () => {
+    const dir = fixture({ 'comp.ts': `${IMPORT}const s = css\`.a{} .b{}\`\nexport const x = s.a + s.typo\n` })
+    const warnings = async (config: InlineConfig = {}) => {
+      const ws: string[] = []
+      await bundle(dir, mergeConfig(config, { build: { rolldownOptions: { onwarn: (w: { message: string }) => void ws.push(w.message) } } }))
+      return ws.filter((m) => m.includes('sfc-css'))
+    }
+    const ws = await warnings()
+    expect(ws).toHaveLength(2)
+    expect(ws[0]).not.toContain('[sfc-css]')
+    expect(ws[0]).toContain(`comp.ts:3 s.typo は css\`\` (2 行目) に定義されていません`)
+    expect(ws[1]).toContain('comp.ts:2 s の未使用のクラス: .b')
+    expect(await warnings({ css: { modules: { localsConvention: 'camelCase' } } })).toEqual([])
+    expect(await warnings({ css: { modules: { exportGlobals: true } } })).toEqual([])
+    expect(await warnings({ css: { modules: { scopeBehaviour: 'global' } } })).toEqual([])
+    expect(await warnings({ css: { modules: { globalModulePaths: [/\.sfc\d+\./] } } })).toEqual([])
+    // lightningcss では Vite が localsConvention を無視するので、検査する
+    expect(await warnings({ css: { transformer: 'lightningcss', modules: { localsConvention: 'camelCase' } } })).toHaveLength(2)
+  })
 })
 
 describe('dev server', () => {
@@ -283,6 +427,31 @@ describe('dev server', () => {
     // 仮想 CSS の importer が一度いなくなるので full-reload になる。CSS だけの更新や空の更新にならなければよい
     const back = await s.edit('comp.ts', devComp('red', 'green'))
     expect(back.type === 'full-reload' || s.paths(back)?.includes('/comp.ts')).toBe(true)
+  })
+
+  test('警告は内容が変わったときだけ、画面をクリアせずに出す: CSS だけの HMR では出し、SSR との二重 transform や JS だけの変更では重複させない', async () => {
+    const src = (css: string, js = '') =>
+      `${IMPORT}const s = css\`${css}\`\nexport const x = s.a${js}\nif (import.meta.hot) import.meta.hot.accept()\n`
+    const s = await serve(fixture({ 'comp.ts': src('.a{} .b{}') }))
+    const warn = vi.spyOn(s.server.config.logger, 'warn')
+    const warned = () => {
+      const calls = warn.mock.calls.splice(0)
+      expect(calls.filter(([, o]) => o?.clear)).toEqual([])
+      return calls.map(([m]) => m.match(/未使用のクラス: [.\w, ]*/)?.[0])
+    }
+    await s.transform('/comp.ts')
+    await s.server.environments.ssr.transformRequest('/comp.ts')
+    expect(warned()).toEqual(['未使用のクラス: .b'])
+    await s.transform('/comp.ts.sfc0.module.css')
+
+    const css = await s.edit('comp.ts', src('.a{} .b{} .c{}'))
+    expect(s.paths(css)).toEqual(['/comp.ts.sfc0.module.css'])
+    expect(warned()).toEqual(['未使用のクラス: .b, .c'])
+
+    const js = await s.edit('comp.ts', src('.a{} .b{} .c{}', ' + 1'))
+    expect(s.paths(js)).toContain('/comp.ts')
+    await s.transform('/comp.ts')
+    expect(warned()).toEqual([])
   })
 
   test('generateScopedName が関数指定なら、クラス名が変わりうるので CSS だけの更新にしない', async () => {
